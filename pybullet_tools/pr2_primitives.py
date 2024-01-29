@@ -434,15 +434,11 @@ def get_ir_sampler(problem, custom_limits={}, max_attempts=25, collisions=True, 
 
 ##################################################
 
-def get_ik_fn(problem, custom_limits={}, collisions=True, teleport=False):
-    robot = problem.robot
-    obstacles = problem.fixed if collisions else []
-    if is_ik_compiled():
-        print('Using ikfast for inverse kinematics')
-    else:
-        print('Using pybullet for inverse kinematics')
+def get_ik_fn(robot, fixed=[], custom_limits={}, collisions=True, teleport=False):
+    #robot = problem.robot
 
     def fn(arm, obj, pose, grasp, base_conf):
+        obstacles = fixed
         approach_obstacles = {obst for obst in obstacles if not is_placement(obj, obst)}
         gripper_pose = multiply(pose.value, invert(grasp.value)) # w_f_g = w_f_o * (g_f_o)^-1
         #approach_pose = multiply(grasp.approach, gripper_pose)
@@ -459,16 +455,16 @@ def get_ik_fn(problem, custom_limits={}, collisions=True, teleport=False):
         grasp_conf = pr2_inverse_kinematics(robot, arm, gripper_pose, custom_limits=custom_limits) #, upper_limits=USE_CURRENT)
                                             #nearby_conf=USE_CURRENT) # upper_limits=USE_CURRENT,
         if (grasp_conf is None) or any(pairwise_collision(robot, b) for b in obstacles): # [obj]
-            #print('Grasp IK failure', grasp_conf)
-            #if grasp_conf is not None:
-            #    print(grasp_conf)
-            #    #wait_if_gui()
+            print('Grasp IK failure', grasp_conf)
+            if grasp_conf is not None:
+                print(grasp_conf)
+                #wait_if_gui()
             return None
         #approach_conf = pr2_inverse_kinematics(robot, arm, approach_pose, custom_limits=custom_limits,
         #                                       upper_limits=USE_CURRENT, nearby_conf=USE_CURRENT)
         approach_conf = sub_inverse_kinematics(robot, arm_joints[0], arm_link, approach_pose, custom_limits=custom_limits)
         if (approach_conf is None) or any(pairwise_collision(robot, b) for b in obstacles + [obj]):
-            #print('Approach IK failure', approach_conf)
+            print('Approach IK failure', approach_conf)
             #wait_if_gui()
             return None
         approach_conf = get_joint_positions(robot, arm_joints)
@@ -533,11 +529,11 @@ def get_ik_ir_gen(problem, max_attempts=25, learned=True, teleport=False, **kwar
 
 ##################################################
 
-def get_motion_gen(problem, custom_limits={}, collisions=True, teleport=False):
+def get_motion_gen(robot, fixed =[],  custom_limits={}, collisions=True, teleport=False):
     # TODO: include fluents
-    robot = problem.robot
+    #robot = problem.robot
     saver = BodySaver(robot)
-    obstacles = problem.fixed if collisions else []
+    obstacles = fixed
     def fn(bq1, bq2, fluents=[]):
         saver.restore()
         bq1.assign()

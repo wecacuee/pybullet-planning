@@ -5,18 +5,76 @@ from __future__ import print_function
 import pybullet as p
 import time
 import numpy as np
-
-from pybullet_tools.pr2_utils import TOP_HOLDING_LEFT_ARM, PR2_URDF, DRAKE_PR2_URDF, \
-    SIDE_HOLDING_LEFT_ARM, PR2_GROUPS, open_arm, get_disabled_collisions, REST_LEFT_ARM, rightarm_from_leftarm
+from pybullet_tools.pr2_primitives import Pose, Conf, get_ik_ir_gen, get_motion_gen, \
+    get_stable_gen, get_grasp_gen, Attach, Detach, Clean, Cook, control_commands, \
+    get_gripper_joints, GripperCommand, apply_commands, State
+from pybullet_tools.kuka_primitives import BodyPose, BodyConf, Command, get_grasp_gen, \
+    get_ik_fn, get_free_motion_gen, get_holding_motion_gen
+from pybullet_tools.pr2_utils import TOP_HOLDING_LEFT_ARM, PR2_URDF, PR2_TOOL_FRAMES,ARM_NAMES, DRAKE_PR2_URDF, \
+    SIDE_HOLDING_LEFT_ARM,get_side_grasps, get_top_grasps,PR2_GROUPS, open_arm, get_disabled_collisions, REST_LEFT_ARM, rightarm_from_leftarm
 from pybullet_tools.utils import set_base_values, joint_from_name, quat_from_euler, set_joint_position, \
     set_joint_positions, add_data_path, connect, plan_base_motion, plan_joint_motion, enable_gravity, \
     joint_controller, dump_body, load_model, joints_from_names, wait_if_gui, disconnect, get_joint_positions, \
-    get_link_pose, link_from_name, HideOutput, get_pose, wait_if_gui, load_pybullet, set_quat, Euler, PI, RED, add_line, \
-    wait_for_duration, LockRenderer, base_aligned_z, Point, set_point, get_aabb, stable_z_on_aabb, AABB
+    get_link_pose, link_from_name, HideOutput, get_pose,BLOCK_URDF, wait_if_gui, load_pybullet, set_quat, Euler, PI, RED, add_line, \
+    wait_for_duration, LockRenderer, base_aligned_z, Point, set_point, get_aabb, stable_z_on_aabb, AABB, \
+    WorldSaver, enable_gravity,GraspInfo, dump_world, set_pose, \
+    draw_global_system, draw_pose, set_camera_pose, Pose, Point, set_default_camera, stable_z, \
+    BLOCK_URDF, load_model, wait_if_gui, disconnect, DRAKE_IIWA_URDF, wait_if_gui, update_state, disable_real_time, HideOutput, \
+    get_model_path, draw_pose, get_max_limit, get_movable_joints, set_joint_position, unit_pose, create_box, RED, set_point, \
+    stable_z, set_camera_pose, LockRenderer, add_line, multiply, invert, get_relative_pose, GREEN, BLUE, TAN, create_cylinder
 
-# TODO: consider making this a function
 SLEEP = None # None | 0.05
+LEFT_ARM = 'left'
+GRASP_INFO = {
+    'top': GraspInfo(lambda body: get_top_grasps(body, under=True, tool_pose=Pose(), max_width=INF,  grasp_length=0),
+                     approach_pose=Pose(0.1*Point(z=1))),
+}
+def get_grasp_gen(robot, grasp_name='top'):
+    grasp_info = GRASP_INFO[grasp_name]
+    tool_link = link_from_name(robot, PR2_TOOL_FRAMES[LEFT_ARM])
+    def gen(body):
+        grasp_poses = grasp_info.get_grasps(body)
+        # TODO: continuous set of grasps
+        for grasp_pose in grasp_poses:
+            body_grasp = BodyGrasp(body, grasp_pose, grasp_info.approach_pose, robot, tool_link)
+            yield (body_grasp,)
+    return gen
 
+def plan(robot, block, fixed, teleport):
+    grasp_gen = get_top_grasps(robot, 'top')
+    ik_fn = get_ik_fn(robot, fixed=fixed, teleport=teleport)
+    free_motion_fn = get_free_motion_gen(robot, fixed=([block] + fixed), teleport=teleport)
+    holding_motion_fn = get_holding_motion_gen(robot, fixed=fixed, teleport=teleport)
+
+    pose0 = BodyPose(block)
+    conf0 = BodyConf(robot)
+    saved_world = WorldSaver()
+    for grasp, in grasp_gen(block):
+        saved_world.restore()
+        result1 = ik_fn(block, pose0, grasp)
+        if result1 is None:
+            continue
+        conf1, path2 = result1
+        pose0.assign()
+        result2 = free_motion_fn(conf0, conf1)
+        if result2 is None:
+            continue
+        path1, = result2
+        result3 = holding_motion_fn(conf1, conf0, block, grasp)
+        if result3 is None:
+            continue
+        path3, = result3
+        return Command(path1.body_paths +
+                          path2.body_paths +
+                          path3.body_paths)
+    return None
+def close_gripper(robot):
+    for joint in get_movable_joints(robot):
+        set_joint_position(robot, joint, get_max_limit(robot, joint))
+
+def open_gripper(robot):
+    for joint in get_movable_joints(robot):
+        set_joint_position(robot, joint, get_max_limit(robot, joint))
 
 def test_base_motion(pr2, base_start, base_goal, obstacles=[]):
     #disabled_collisions = get_disabled_collisions(pr2)
@@ -57,7 +115,8 @@ def test_drake_base_motion(pr2, base_start, base_goal, obstacles=[]):
     for bq in base_path:
         set_joint_positions(pr2, base_joints, bq)
         if SLEEP is None:
-            wait_if_gui('Continue?')
+            #wait_if_gui('Continue?')
+            continue
         else:
             wait_for_duration(SLEEP)
 
@@ -112,6 +171,8 @@ def test_ikfast(pr2):
 #####################################
 
 def main(use_pr2_drake=True):
+    display = 'execute'
+    arm = 'left'
     connect(use_gui=True)
     add_data_path()
 
@@ -119,12 +180,19 @@ def main(use_pr2_drake=True):
     table_path = "models/table_collision/table.urdf"
     table = load_pybullet(table_path, fixed_base=True)
     set_quat(table, quat_from_euler(Euler(yaw=PI/2)))
+    table1 = load_pybullet(table_path, fixed_base=True)
+    
+    set_pose(table1, Pose(Point(x=3)))
+    set_quat(table1, quat_from_euler(Euler(yaw=PI/2)))
+
+    block1 = load_model(BLOCK_URDF, fixed_base=False)
+    set_pose(block1, Pose(Point(x=2.64,z=stable_z(block1, table1))))
     # table/table.urdf, table_square/table_square.urdf, cube.urdf, block.urdf, door.urdf
-    obstacles = [plane, table]
+    obstacles = [plane, table, table1]
 
     pr2_urdf = DRAKE_PR2_URDF if use_pr2_drake else PR2_URDF
     with HideOutput():
-        pr2 = load_model(pr2_urdf, fixed_base=True) # TODO: suppress warnings?
+        pr2 = load_pybullet(pr2_urdf, fixed_base=True) # TODO: suppress warnings?
     dump_body(pr2)
 
     z = base_aligned_z(pr2)
@@ -137,11 +205,11 @@ def main(use_pr2_drake=True):
     wait_if_gui()
 
     base_start = (-2, -2, 0)
-    base_goal = (2, 2, 0)
-    arm_start = SIDE_HOLDING_LEFT_ARM
-    #arm_start = TOP_HOLDING_LEFT_ARM
+    base_goal = (2, 0, 0)
+    #arm_start = SIDE_HOLDING_LEFT_ARM
+    arm_start = TOP_HOLDING_LEFT_ARM
     #arm_start = REST_LEFT_ARM
-    arm_goal = TOP_HOLDING_LEFT_ARM
+    #arm_goal = TOP_HOLDING_LEFT_ARM
     #arm_goal = SIDE_HOLDING_LEFT_ARM
 
     left_joints = joints_from_names(pr2, PR2_GROUPS['left_arm'])
@@ -160,9 +228,23 @@ def main(use_pr2_drake=True):
     else:
         test_base_motion(pr2, base_start, base_goal, obstacles=obstacles)
 
-    test_arm_motion(pr2, left_joints, arm_goal)
+    #test_arm_motion(pr2, left_joints, arm_goal)
     # test_arm_control(pr2, left_joints, arm_start)
-
+    block_pose = get_pose(block1)
+    tool_link = link_from_name(pr2, PR2_TOOL_FRAMES[LEFT_ARM])
+    base_from_tool = get_relative_pose(pr2, tool_link)
+    grasps = get_side_grasps(block1, tool_pose=Pose(euler=Euler(yaw=np.pi/2)),
+                             top_offset=0.02, grasp_length=0.03, under=False)[1:2]
+    #for grasp in grasps:
+    #    gripper_pose = multiply(block_pose, invert(grasp))
+    #    set_pose(pr2, multiply(gripper_pose, invert(base_from_tool)))
+        
+    #command = plan(pr2, block1, fixed=[table1], teleport=False)
+    #attachment = Attach(pr2, 'left', grasp, block1)
+    #attachment.assign()
+    #test_arm_motion(pr2, left_joints, arm_goal)
+    #set_pose(pr2, multiply(gripper_pose, invert(base_from_tool)))
+    #close_gripper(pr2)
     wait_if_gui('Finish?')
     disconnect()
 
